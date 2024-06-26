@@ -1,5 +1,7 @@
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
 import { fileURLToPath } from 'node:url'
+import hash from 'hash.js'
+
 
 const __filename = fileURLToPath(import.meta.url)
 
@@ -48,8 +50,8 @@ export function concatArrayBuffers (abs) {
 
 export function createLargeArrayBuffer (size) {
   const ab = new ArrayBuffer(size)
-  const view = new Uint8Array(ab)
-  for (let i = 0; i < size; i++) view[i] = i % 256 // Fill with some data
+  const view = new Uint32Array(ab)
+  for (let i = 0; i < size; i = (i^2 + 7057) % 256) view[i] = i % 256 // Fill with some data
   return ab
 }
 
@@ -61,6 +63,8 @@ if (isMainThread) {
   console.log('Creating large ArrayBuffer...')
   let payload = createLargeArrayBuffer(FIVE_GB)
 
+  var startingHash = hash.sha1().update(payload).digest('hex')
+  console.log('Starting hash', startingHash)
   /**
    * time and chunk
    */
@@ -72,31 +76,43 @@ if (isMainThread) {
   }
 
   console.log('Sending payload to worker...')
-  worker.postMessage(payload)
+
+  for (const [i, chunk] of payload.entries()) {
+    worker.postMessage({ n: i, m: payload.length, chunk })
+  }
+
+  const chunks = []
 
   // Receive the processed ArrayBuffer from the worker
-  worker.on('message', (res) => {
-    console.log('Received message back from worker', res)
-    console.log('DONE')
+  worker.on('message', ({ n, m, chunk }) => {
+    console.log('Received chunk back from worker', n, m)
+    chunks.push(chunk)
+
+    if (n === m - 1) {
+      console.log('Received all!')
+
+      const res = concatArrayBuffers(chunks)
+      var endingHash = hash.sha1().update(res).digest('hex')
+      console.log('Ending hash', endingHash)
+    }
   })
 } else {
   // Worker thread
   console.log({ workerData })
-  parentPort.on('message', (payload) => {
-    console.log('Worker received payload')
+  const chunks = []
+  parentPort.on('message', ({ n, m, chunk }) => {
+    console.log('Worker received chunk', n, m)
     console.log({ workerData, inside: true })
+    chunks.push(chunk)
     /**
      * time and concat
      * then chunk again to send back to main thread
      */
-    if (workerData.IS_CHUNKING) {
-      console.log('Concatenating then Re-Chunking...')
-      console.time('concat')
-      payload = concatArrayBuffers(payload)
-      console.timeEnd('concat')
-      payload = splitArrayBuffer(payload, TWO_GB)
+    if (chunks.length === m) {
+      console.log('Returning all chunks...')
+      for (const [i, chunk] of chunks.entries()) {
+        parentPort.postMessage({ n: i, m: chunks.length, chunk })
+      }
     }
-
-    parentPort.postMessage(payload)
   })
 }
